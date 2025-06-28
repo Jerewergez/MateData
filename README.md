@@ -18,26 +18,21 @@ Este script automatiza la apertura, actualización y resguardo de archivos de Ex
   - `pywin32`
   - `os`, `glob`, `re`, `logging`, `time`, `datetime` (incluidas en Python)
 
-Instalación de dependencias:
-
-```bash
-pip install pywin32
-
-##⚙️ Configuración
+⚙️ Configuración
 Editá las siguientes variables al inicio del script:
 
 python
 EXCEL_FILES_DIR = r"C:\ruta\a\los\archivos"
 OUTPUT_BASE_DIR = r"C:\ruta\de\salida"
 EXCEL_PASSWORD  = "tu_password"
-##🧪 Ejecución
+🧪 Ejecución
 Desde la terminal, ejecutá:
 
 bash
 python actualizar_excel.py
 Se logueará el progreso, incluyendo un resumen ASCII de las tablas RESUMEN_KPI.
 
-##🗂️ Estructura esperada
+🗂️ Estructura esperada
 Automatizaciones/
 ├── archivo_original.xlsx
 ├── Procesados/
@@ -47,4 +42,3 @@ Automatizaciones/
 El script ejecuta Excel en segundo plano y desactiva avisos.
 
 La contraseña está escrita en el código. Podés moverla a una variable de entorno para mayor seguridad.
-
