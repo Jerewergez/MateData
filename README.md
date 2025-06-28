@@ -1,24 +1,50 @@
-# MateData 🧉
+# 📊 Excel MateDate 🧉
+
 Este script automatiza la apertura, actualización y resguardo de archivos de Excel con Power Query y Tablas Dinámicas. Ideal para flujos de trabajo que requieren actualización periódica de reportes con mínima intervención manual.
 
-🚀 Funcionalidades
-Abre automáticamente todos los archivos .xlsx y .xlsm de una carpeta.
+## 🚀 Funcionalidades
 
-Actualiza consultas de Power Query y tablas dinámicas.
+- 🔄 Actualiza consultas de Power Query y tablas dinámicas.
+- 🧾 Muestra en consola tablas llamadas `RESUMEN_KPI` antes y después del refresh.
+- 📆 Lee la fecha desde la celda `AA1` para renombrar copias procesadas.
+- 📂 Guarda versiones organizadas por fecha en carpetas específicas.
 
-Muestra en consola tablas llamadas RESUMEN_KPI antes y después del refresh.
+## 🛠️ Requisitos
 
-Lee la fecha desde la celda AA1 para nombrar las copias procesadas.
+- Sistema operativo: **Windows**
+- Software necesario: **Microsoft Excel**
+- Python 3.7 o superior
+- Librerías necesarias:
+  - `pywin32`
+  - `os`, `glob`, `re`, `logging`, `time`, `datetime` (incluidas en Python)
 
-Renombra los archivos y los guarda organizadamente en una carpeta destino con fecha.
+Instalación de dependencias:
 
-🛠️ Requisitos
-Windows con Microsoft Excel instalado.
+```bash
+pip install pywin32
 
-Python 3.7 o superior.
+##⚙️ Configuración
+Editá las siguientes variables al inicio del script:
 
-Dependencias:
+python
+EXCEL_FILES_DIR = r"C:\ruta\a\los\archivos"
+OUTPUT_BASE_DIR = r"C:\ruta\de\salida"
+EXCEL_PASSWORD  = "tu_password"
+##🧪 Ejecución
+Desde la terminal, ejecutá:
 
-pywin32 (automatización de Excel)
+bash
+python actualizar_excel.py
+Se logueará el progreso, incluyendo un resumen ASCII de las tablas RESUMEN_KPI.
 
-Librerías estándar: os, glob, re, logging, time, datetime
+##🗂️ Estructura esperada
+Automatizaciones/
+├── archivo_original.xlsx
+├── Procesados/
+│   └── archivo_original 28-06/
+│       └── archivo_original 28-06.xlsx
+🔐 Seguridad
+El script ejecuta Excel en segundo plano y desactiva avisos.
+
+La contraseña está escrita en el código. Podés moverla a una variable de entorno para mayor seguridad.
+
