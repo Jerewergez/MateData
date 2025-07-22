@@ -6,7 +6,7 @@ Este script automatiza la apertura, actualización y resguardo de archivos de Ex
 
 - 🔄 Actualiza consultas de Power Query y tablas dinámicas.
 - 🧾 Muestra en consola tablas llamadas `RESUMEN_KPI` antes y después del refresh.
-- 📆 Lee la fecha desde la celda `AA1` para renombrar copias procesadas.
+- 📆 Lee la fecha de la hoja resumen desde la celda `AA1` para renombrar copias procesadas.
 - 📂 Guarda versiones organizadas por fecha en carpetas específicas.
 
 ## 🛠️ Requisitos
