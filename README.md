@@ -15,6 +15,9 @@ PivotTables y guarda una copia renombrada según la celda **AA1**.
 - [Cómo funciona](#cómo-funciona)
 - [Flujo por worker](#flujo-por-worker)
 - [Salida y logs](#salida-y-logs)
+  - [Terminal (stdout)](#terminal-stdout)
+  - [Resumen final](#resumen-final)
+  - [Tabla comparativa acumulada](#tabla-comparativa-acumulada)
 - [CSV de auditoría](#csv-de-auditoría)
 - [Manejo de errores](#manejo-de-errores)
 - [Preguntas frecuentes](#preguntas-frecuentes)
@@ -249,6 +252,37 @@ Al terminar todo, se imprime un bloque de resumen:
   [14:35:40] Duración total: 320.45s
   [14:35:40] CSV: D:\Procesados\Datos_De_Ejecucion_20250617_143001.csv
 ```
+
+### Tabla comparativa acumulada
+
+Después del resumen final, el script muestra una **tabla consolidada** con todos los KPIs
+de la tabla `RESUMEN_KPI` de **todos los archivos procesados**, comparando los valores
+Before vs After del refresh. Ideal para ver de un vistazo qué cambió en cada indicador.
+
+```
+  ┌────────────────────────────────────────────────────────────────────────────────┐
+  │  Tabla consolidada — todas las tablas RESUMEN_KPI ordenadas por SERVICIO      │
+  └────────────────────────────────────────────────────────────────────────────────┘
+
+  ARCHIVO      │ KPI        │ SUBÁREA │ SERVICIO     │ ANTES   │ DESPUÉS │ Δ GAP    │ ALCANCE
+  ───────────────────────────────────────────────────────────────────────────────────────
+  Ventas.xlsx  │ GxH        │ SOPORTE │ SOPORTE-RRSS │ 3.7383  │ 3.8157  │ +0.0774  │ Pasa
+  Ventas.xlsx  │ REL        │ SOPORTE │ SOPORTE-RRSS │ 0.7496  │ 0.7478  │ -0.0019  │ Pasa
+ ⚡ Ventas.xlsx │ % CASO     │ SOPORTE │ SOPORTE-RRSS │ 0.7875  │ 0.7793  │ -0.0081  │ NO Pasa
+  ───────────────────────────────────────────────────────────────────────────────────────
+  Stock.xlsx   │ GxH        │ CALIDAD │ CALIDAD-SAT   │ 2.4500  │ 2.5100  │ +0.0600  │ Pasa
+```
+
+| Característica | Detalle |
+|----------------|---------|
+| **Origen** | Datos extraídos de las tablas `RESUMEN_KPI` de cada Excel |
+| **Orden** | Por SERVICIO (3ra columna original) |
+| **Archivo** | Columna adicional para identificar el origen cuando hay múltiples archivos |
+| **Δ GAP** | `DESPUÉS - ANTES` del RESULTADO (col 4). En **verde** si mejoró, **rojo** si empeoró |
+| **ALCANCE** | Col 5 (PASA/NO PASA). Se muestra en **rojo** si cambió entre Before y After |
+| **⚡** | Marcador en filas donde se detectó algún cambio (gap ≠ 0 o ALCANCE cambió) |
+
+**Nota:** Si `colorama` no está instalado, los colores no se ven pero la tabla se muestra igual.
 
 ---
 
