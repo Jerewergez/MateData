@@ -1,77 +1,333 @@
-# 🧉 MateDate 📊 Excel Refresher & Archiver
+# ExelenParalelo
 
-Este script automatiza la apertura, actualización y resguardo de archivos de Excel con Power Query y Tablas Dinámicas. Ideal para flujos de trabajo que requieren actualización periódica de reportes con mínima intervención manual.
+Procesamiento **paralelo** de archivos Excel con PowerQuery, ODBC y tablas dinámicas.
+Abre cada workbook, refresca todas las conexiones, espera a que terminen, actualiza
+PivotTables y guarda una copia renombrada según la celda **AA1**.
 
-## 🚀 Funcionalidades
+---
 
-- 🔄 Actualiza consultas de Power Query y tablas dinámicas.
-- 🧾 Muestra en consola tablas llamadas `RESUMEN_KPI` antes y después del refresh.
-- 📆 Lee la fecha de la hoja resumen desde la celda `AA1` para renombrar copias procesadas.
-- 📂 Guarda versiones organizadas por fecha en carpetas específicas.
+## Tabla de contenidos
 
-## 🛠️ Requisitos
+- [Arquitectura](#arquitectura)
+- [Requisitos](#requisitos)
+- [Instalación](#instalación)
+- [Configuración](#configuración)
+- [Cómo funciona](#cómo-funciona)
+- [Flujo por worker](#flujo-por-worker)
+- [Salida y logs](#salida-y-logs)
+- [CSV de auditoría](#csv-de-auditoría)
+- [Manejo de errores](#manejo-de-errores)
+- [Preguntas frecuentes](#preguntas-frecuentes)
 
-- Sistema operativo: **Windows**
-- Software necesario: **Microsoft Excel**
-- Python 3.7 o superior
-- Librerías necesarias:
-  - `pywin32`
-  - `os`, `glob`, `re`, `logging`, `time`, `datetime` (incluidas en Python)
+---
 
-Instalación de dependencias:
+## Arquitectura
 
 ```
-pip install pywin32
+┌──────────────────────────────────────────────────────┐
+│                    PROCESO PADRE                      │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐         │
+│  │ Worker 1 │   │ Worker 2 │   │ Worker 3 │  … hasta │
+│  │ (Excel)  │   │ (Excel)  │   │ (Excel)  │  MAX_   │
+│  └────┬─────┘   └────┬─────┘   └────┬─────┘  WORKERS│
+│       │              │              │               │
+│       └──────────────┴──────────────┘               │
+│                         │ IPC: multiprocessing.Queue │
+│                         ▼                            │
+│              ┌────────────────────┐                  │
+│              │   Orquestador      │                  │
+│              │  - timeouts        │                  │
+│              │  - reintentos      │                  │
+│              │  - barra progreso  │                  │
+│              │  - CSV auditoría   │                  │
+│              └────────────────────┘                  │
+└──────────────────────────────────────────────────────┘
 ```
-## ⚙️ Configuración
 
-Editá las siguientes variables al inicio del script:
+Cada worker corre en un **proceso hijo independiente** (`multiprocessing.Process`).
+Se comunican con el padre mediante una `Queue` (por mensajes): primero envían el
+PID de su instancia de Excel, y al terminar envían el resultado (éxito/error,
+ruta del archivo guardado, stdout del proceso).
+
+El padre mantiene un **pool de hasta `MAX_WORKERS` workers concurrentes**.
+apenas uno termina, lanza el siguiente de la cola de pendientes.
+
+---
+
+## Requisitos
+
+| Requisito | Detalle |
+|-----------|---------|
+| **SO** | Windows (usa `win32com`, `win32process`, `taskkill`) |
+| **Excel** | Microsoft Excel instalado (2016+) |
+| **Python** | 3.8 o superior |
+| **pywin32** | `pip install pywin32` |
+| **colorama** | Opcional — `pip install colorama` (logs en color) |
+
+No funciona en Linux/Mac por las dependencias COM de Windows.
+
+---
+
+## Instalación
+
+```powershell
+# 1. Clonar o copiar el script
+# 2. Instalar dependencias
+pip install pywin32 colorama
+
+# 3. Verificar que funcione
+python ExelenParalelo.py --help   # (o simplemente ejecutarlo)
+```
+
+> **Nota**: `colorama` es opcional. Sin ella los logs se ven igual, solo sin colores.
+
+---
+
+## Configuración
+
+Toda la configuración está al inicio del archivo, en la sección `CONFIG`.
+Son variables globales con valores por defecto que cubren el caso típico.
+
+| Variable | Tipo | Defecto | Qué hace |
+|----------|------|---------|----------|
+| `INPUT_EXCEL_DIR` | `str` | `D:\Bases` | Carpeta con los excels a procesar |
+| `LOCAL_OUTPUT_DIR` | `Path` | `D:\Procesados` | Carpeta donde se guardan las copias procesadas |
+| `EXCEL_PASSWORD` | `str` | `"vam123"` | Contraseña de apertura de los workbooks |
+| `CLOSE_ALL_EXCEL_BEFORE` | `bool` | `True` | Mata toda instancia de Excel **antes** de empezar |
+| `CLOSE_ALL_EXCEL_AFTER` | `bool` | `True` | Mata toda instancia de Excel **al terminar** |
+| `CLOSE_WAIT_S` | `int` | `3` | Segundos de espera después de matar Excel |
+| `DATE_PATTERN` | `re.Pattern` | `(\d{2}-\d{2})(?=\s*al)` | Regex para detectar fechas en el nombre del archivo |
+| `MAX_WORKERS` | `int` | `3` | Máximo de procesos Excel concurrentes |
+| `TIMEOUT_S` | `int` | `3600` | Timeout por archivo (1 hora) |
+| `MAX_RETRIES` | `int` | `2` | Reintentos antes de dar un archivo por perdido |
+
+### Cómo modificar
+
+Abrís el archivo, cambiás la variable y guardás. No necesita archivos
+de configuración externos ni variables de entorno.
 
 ```python
-EXCEL_FILES_DIR = r"C:\ruta\a\los\archivos"
-OUTPUT_BASE_DIR = r"C:\ruta\de\salida"
-EXCEL_PASSWORD  = "tu_password"
+# Ejemplo: aumentar workers a 5 y reducir timeout a 30 min
+MAX_WORKERS = 5
+TIMEOUT_S   = 1800
 ```
 
-## 🧪 Ejecución
-Desde la terminal, ejecutá:
+---
+
+## Cómo funciona
+
+### 1. Inicio
+
+1. Si `CLOSE_ALL_EXCEL_BEFORE` está activo, mata todas las instancias de
+   `EXCEL.EXE` con `taskkill /F`. Esto evita conflictos de archivos bloqueados.
+2. Escanea `INPUT_EXCEL_DIR` en busca de archivos `*.xls*`.
+3. Crea el CSV de auditoría con timestamp en el nombre.
+
+### 2. Procesamiento paralelo
+
+El script mantiene hasta `MAX_WORKERS` workers vivos simultáneamente:
+
 ```
-python actualizar_excel.py
+Cola de pendientes: [A.xlsx, B.xlsx, C.xlsx, D.xlsx, E.xlsx]
+                          │
+             ┌────────────┼────────────┐
+             ▼            ▼            ▼
+         Worker A     Worker B     Worker C
+         (activo)     (activo)     (activo)
+             │
+             ▼  (termina)
+         [A.xlsx OK]
+             │
+             ▼
+         Lanzar D.xlsx → reemplaza a A en el pool
 ```
 
-Se logueará el progreso, incluyendo un resumen ASCII de las tablas RESUMEN_KPI:
+### 3. Finalización
+
+Cuando todos los archivos se procesaron (o agotaron reintentos), se muestra
+un **resumen final** con la cuenta de éxitos y errores.
+
+---
+
+## Flujo por worker
+
+Cada worker corre el siguiente pipeline:
+
 ```
-2025-06-28 14:31:28 - INFO - ==== Se inicio la actualización correctamente ====
-2025-06-28 14:31:30 - INFO - Procesando CxH SERVICE RRSS SOPORTE al.xlsx
-2025-06-28 14:31:36 - INFO - Before refresh – Tabla RESUMEN_KPI1 en hoja RESUMEN:
-2025-06-28 14:31:36 - INFO - +----------------+---------+--------------+--------------------+---------+------------+
-2025-06-28 14:31:36 - INFO - | KPI            | SUBÁREA | SERVICIO     | RESULTADO          | ALCANCE | FECHA KPI  |
-2025-06-28 14:31:36 - INFO - +----------------+---------+--------------+--------------------+---------+------------+
-2025-06-28 14:31:36 - INFO - | GxH            | SOPORTE | SOPORTE-RRSS | 3.7383450564344636 | 0.01    | 2025-06-21 |
-2025-06-28 14:31:36 - INFO - | REL            | SOPORTE | SOPORTE-RRSS | 0.7496116701560073 | 0.0     | 2025-06-21 |
-2025-06-28 14:31:36 - INFO - | % CASO CERRADO | SOPORTE | SOPORTE-RRSS | 0.7874595231086252 | Pasa    | 2025-06-21 |
-2025-06-28 14:31:36 - INFO - +----------------+---------+--------------+--------------------+---------+------------+
-2025-06-28 14:32:14 - INFO - After refresh – Tabla RESUMEN_KPI1 en hoja RESUMEN:
-2025-06-28 14:32:14 - INFO - +----------------+---------+--------------+--------------------+---------+------------+
-2025-06-28 14:32:14 - INFO - | KPI            | SUBÁREA | SERVICIO     | RESULTADO          | ALCANCE | FECHA KPI  |
-2025-06-28 14:32:14 - INFO - +----------------+---------+--------------+--------------------+---------+------------+
-2025-06-28 14:32:14 - INFO - | GxH            | SOPORTE | SOPORTE-RRSS | 3.8156587308734617 | 0.02    | 2025-06-25 |
-2025-06-28 14:32:14 - INFO - | REL            | SOPORTE | SOPORTE-RRSS | 0.7477529164276152 | 0.0     | 2025-06-25 |
-2025-06-28 14:32:14 - INFO - | % CASO CERRADO | SOPORTE | SOPORTE-RRSS | 0.7793468200449557 | Pasa    | 2025-06-25 |
-2025-06-28 14:32:14 - INFO - +----------------+---------+--------------+--------------------+---------+------------+
-2025-06-28 14:32:18 - INFO - Guardado → C:\Users\i44475827\Documents\Automatizaciones\Procesados\CxH SERVICE RRSS SOPORTE al 25-06\CxH SERVICE RRSS SOPORTE al 25-06.xlsx
+ 1. Iniciar Excel invisible
+    └─ win32.DispatchEx("Excel.Application")
+    └─ Enviar PID al padre (para poder matarlo si hay timeout)
+
+ 2. Abrir workbook
+    └─ excel.Workbooks.Open(..., password)
+
+ 3. Snapshot "Before" de tablas RESUMEN_KPI
+    └─ (solo si existen)
+
+ 4. RefreshAll
+    └─ disable_background_refresh() → apaga BackgroundQuery
+    └─ wb.RefreshAll()
+    └─ wait_until_queries_done() → polling hasta que todas
+       las conexiones terminen (con timeout de 30 min)
+
+ 5. Refrescar PivotTables
+    └─ Itera todas las hojas → todas las tablas dinámicas
+
+ 6. Snapshot "After" de RESUMEN_KPI
+
+ 7. Guardar copia local
+    └─ Lee celda AA1 → extrae fecha
+    └─ Renombra: reemplaza "dd-mm" en el nombre original por la fecha de AA1
+    └─ wb.SaveCopyAs()
+
+ 8. Cerrar Excel
+
+ 9. Enviar resumen al padre
 ```
 
-## 🗂️ Estructura esperada
-```
-Automatizaciones/
-├── archivo_original.xlsx
-├── Procesados/
-│   └── archivo_original 28-06/
-│       └── archivo_original 28-06.xlsx
-```
-## 🔐 Seguridad
+---
 
-- El script ejecuta Excel en segundo plano y desactiva avisos.
-- La contraseña está escrita en el código. Podés moverla a una variable de entorno para mayor seguridad.
+## Salida y logs
 
+El script produce tres tipos de salida:
+
+### Terminal (stdout)
+
+Logs en vivo con timestamps y colores (si colorama está instalado):
+
+```
+  ┌────────────────────────────────────────────┐
+  │  INICIO — ExelenParalelo                   │
+  └────────────────────────────────────────────┘
+
+  [14:30:01] ✓ Archivos detectados: 5
+
+  [14:30:01] ▶ Ventas_Q1 (PID 8412, intento 1/2)
+  📊 ███░░░░░░░░░░░░░░░░░ 1/5  (3 activos, 1 pendientes)  12s  (20.0%)
+
+  [14:30:12] ✓ Ventas_Q1 → D:\Procesados\Ventas 15-03.xlsx (11.2s)
+  [14:30:12] ▶ Stock_Actual (PID 8501, intento 1/2)
+  📊 ██████░░░░░░░░░░░░░░ 2/5  (3 activos, 0 pendientes)  14s  (40.0%)
+```
+
+Cada worker vuelca su stdout interno indentado con `┊` para distinguirlo
+de los logs del padre.
+
+### CSV de auditoría
+
+Se genera un archivo `Datos_De_Ejecucion_<timestamp>.csv` en `LOCAL_OUTPUT_DIR`
+con una fila por cada intento de procesamiento (incluyendo reintentos).
+
+| Columna | Descripción |
+|---------|-------------|
+| `timestamp` | Momento del log |
+| `intento` | Número de intento (1, 2, …) |
+| `archivo` | Nombre del archivo original |
+| `ok` | `True` o `False` |
+| `ruta_local` | Ruta absoluta del archivo guardado |
+| `fecha_AA1` | Fecha extraída de la celda AA1 |
+| `duracion_s` | Segundos que tomó procesarlo |
+| `error` | Mensaje de error (si falló) |
+
+Las columnas están separadas por `;` (punto y coma) para que Excel las abra
+directamente.
+
+### Resumen final
+
+Al terminar todo, se imprime un bloque de resumen:
+
+```
+  ┌────────────────────────────────────────────┐
+  │  RESUMEN FINAL                             │
+  └────────────────────────────────────────────┘
+
+  [14:35:40] ✓ Procesados: 5
+  [14:35:40] ✓ Éxitos:     4
+  [14:35:40] ✗ Errores:    1
+               • Balance_Anual: Timeout 3600s
+
+  [14:35:40] Duración total: 320.45s
+  [14:35:40] CSV: D:\Procesados\Datos_De_Ejecucion_20250617_143001.csv
+```
+
+---
+
+## CSV de auditoría
+
+Cada ejecución genera un CSV en `LOCAL_OUTPUT_DIR` con timestamp en el nombre:
+
+```
+D:\Procesados\
+├── Ventas 15-03.xlsx
+├── Stock 22-03.xlsx
+├── Datos_De_Ejecucion_20250617_143001.csv   ← este
+└── Datos_De_Ejecucion_20250618_090215.csv   ← ejecución anterior
+```
+
+El CSV es un archivo de texto plano con encoding UTF-8 y separador `;`.
+Podés abrirlo directamente en Excel o PowerQuery para hacer análisis.
+
+---
+
+## Manejo de errores
+
+### Timeout por archivo (`TIMEOUT_S`)
+
+Si un worker supera el tiempo límite:
+
+1. Se **termina** el proceso worker (`p.terminate()`)
+2. Se **mata** la instancia de Excel asociada (vía `taskkill /PID`)
+3. Si quedan reintentos, se **reencola** el archivo
+4. Si se agotaron los reintentos, se marca como error definitivo
+
+### Error interno del worker
+
+Cualquier excepción dentro del worker:
+
+1. Se cierran los objetos COM (workbook, Excel) con `try/except`
+2. Se envía el resumen con `ok=False` y el mensaje de error
+3. El padre decide si reintenta según `MAX_RETRIES`
+
+### Trabajo sucio (cleanup)
+
+- Si se cae el padre (Ctrl+C, cierre de terminal), los workers hijos
+  se vuelven huérfanos.
+- `CLOSE_ALL_EXCEL_AFTER=True` mata todo Excel al finalizar (incluso
+  instancias pre-existentes), actuando como red de seguridad.
+- Si esto es un problema, ponerlo en `False`.
+
+---
+
+## Preguntas frecuentes
+
+### ¿Puedo cambiar la cantidad de workers sobre la marcha?
+
+No — hay que editar `MAX_WORKERS` en el archivo y reiniciar.
+
+### ¿Qué pasa si un Excel está abierto por un usuario?
+
+Si `CLOSE_ALL_EXCEL_BEFORE=True`, se cierra forzosamente (se pierden
+cambios no guardados). Si está en `False`, `Workbooks.Open()` va a fallar
+porque el archivo está bloqueado.
+
+### ¿Cómo sé que archivos fallaron?
+
+1. Mirá el **resumen final** en terminal
+2. Abrí el **CSV de auditoría** y filtrá por `ok=False`
+
+### ¿Puedo procesar solo algunos archivos?
+
+Mové los que no querés procesar fuera de `INPUT_EXCEL_DIR`, o cambiá
+la variable para que apunte a una subcarpeta.
+
+### ¿Sirve en Linux con LibreOffice?
+
+No. El script depende de `win32com` (COM de Windows) y Excel.
+Para Linux necesitarías una aproximación completamente distinta
+(por ejemplo, `python-calc` con LibreOffice o `xlwings` vía REST).
+
+---
+
+## Licencia
+
+Uso interno — Pulso Data Team.
