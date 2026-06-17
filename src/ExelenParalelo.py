@@ -319,6 +319,38 @@ def rename_and_save_local(wb, original_name, output) -> Tuple[str, str]:
     return local_path, aa1_date_str
 
 
+def extract_tablas_data(wb) -> Tuple[List[str], List[dict]]:
+    """Extrae datos de tablas RESUMEN_KPI como dicts estructurados.
+    Retorna (headers, rows) donde cada row es un dict clave->valor."""
+    all_rows: List[dict] = []
+    headers: List[str] = []
+    for ws in wb.Worksheets:
+        try:
+            for lo in ws.ListObjects:
+                if not lo.Name.upper().startswith("RESUMEN_KPI"):
+                    continue
+                hdr_rng = lo.HeaderRowRange
+                cols = hdr_rng.Columns.Count
+                headers = [str(hdr_rng.Cells(1, j).Value or "") for j in range(1, cols + 1)]
+                data_rng = lo.DataBodyRange
+                if data_rng:
+                    for i in range(1, data_rng.Rows.Count + 1):
+                        row = {}
+                        for j in range(1, cols + 1):
+                            cell = ws.Cells(
+                                data_rng.Row + i - 1,
+                                data_rng.Column + j - 1
+                            ).Value
+                            if hasattr(cell, "strftime"):
+                                row[headers[j - 1]] = cell.strftime("%Y-%m-%d")
+                            else:
+                                row[headers[j - 1]] = cell
+                        all_rows.append(row)
+        except Exception:
+            pass
+    return headers, all_rows
+
+
 def _worker_process(full_path: str, q: Queue):
     """
     Proceso hijo: procesa 1 Excel y envía resultado por Queue.
@@ -363,8 +395,9 @@ def _worker_process(full_path: str, q: Queue):
         )
         wlog("[OK] Workbook abierto.")
 
-        # ── Snapshot antes ──
+        # ── Snapshot antes (texto + datos) ──
         print_resumen_kpi(wb, 'Before', output)
+        tab_headers, tablas_before = extract_tablas_data(wb)
 
         # ── Refresh ──
         wlog("[..] Ejecutando RefreshAll…")
@@ -386,8 +419,9 @@ def _worker_process(full_path: str, q: Queue):
                 wlog(f"[WARN] PivotTables en hoja {ws.Name}: {e}")
         wlog(f"[OK] {pivot_count} PivotTables actualizadas.")
 
-        # ── Snapshot después ──
+        # ── Snapshot después (texto + datos) ──
         print_resumen_kpi(wb, 'After', output)
+        _, tablas_after = extract_tablas_data(wb)
 
         # ── Guardar copia local ──
         saved_local, aa1_date = rename_and_save_local(wb, nombre, output)
@@ -411,7 +445,8 @@ def _worker_process(full_path: str, q: Queue):
             "duracion_s": dur,
             "error": ""
         }
-        q.put({"stem": stem, "resumen": resumen, "stdout": output.getvalue()})
+        q.put({"stem": stem, "resumen": resumen, "stdout": output.getvalue(),
+               "tablas": {"headers": tab_headers, "before": tablas_before, "after": tablas_after}})
 
     except Exception as e:
         # ── Limpieza en error ──
@@ -433,6 +468,177 @@ def _worker_process(full_path: str, q: Queue):
             "error": str(e)
         }
         q.put({"stem": stem, "resumen": resumen, "stdout": salida_err})
+
+
+# ─────────────────────── TABLA COMPARATIVA ACUMULADA ───────────────────────
+
+def print_tablas_comparativa(tablas_coleccion: List[dict]):
+    """Muestra tabla consolidada: compara Before vs After de todos los archivos.
+    7 columnas: KPI | SUBÁREA | SERVICIO | ANTES | DESPUÉS | Δ GAP | ALCANCE
+    Ordenada por SERVICIO (col 3). ALCANCE en rojo si cambió entre pasadas."""
+
+    if not tablas_coleccion:
+        return
+
+    section("TABLA COMPARATIVA ACUMULADA")
+
+    # Armar filas planas [archivo, kpi, subarea, servicio, antes, despues, alcance, gap]
+    planas: List[tuple] = []
+    col_kpi = 0
+    col_sub = 1
+    col_serv = 2
+    col_res = 3
+    col_alc = 4
+
+    for item in tablas_coleccion:
+        archivo = item["archivo"]
+        hdr = item["headers"]
+        bef = {r.get(hdr[col_serv], ""): r for r in item["before"]}
+        aft_list = item["after"]
+
+        for row_a in aft_list:
+            key = str(row_a.get(hdr[col_serv], ""))
+            row_b = bef.get(key, {})
+
+            # Valores
+            kpi = str(row_a.get(hdr[col_kpi], ""))
+            sub = str(row_a.get(hdr[col_sub], ""))
+            serv = key
+
+            # RESULTADO (col 4) — numérico
+            raw_antes = row_b.get(hdr[col_res])
+            raw_despues = row_a.get(hdr[col_res])
+            try:
+                antes_f = float(raw_antes) if raw_antes is not None else None
+            except (ValueError, TypeError):
+                antes_f = None
+            try:
+                despues_f = float(raw_despues) if raw_despues is not None else None
+            except (ValueError, TypeError):
+                despues_f = None
+
+            if antes_f is not None and despues_f is not None:
+                gap = despues_f - antes_f
+                gap_str = f"{gap:+.4f}"
+                antes_str = f"{antes_f:.4f}"
+                despues_str = f"{despues_f:.4f}"
+            else:
+                gap_str = "N/A"
+                antes_str = str(raw_antes or "")
+                despues_str = str(raw_despues or "")
+
+            # ALCANCE (col 5) — PASA/NO PASA
+            alc_before = str(row_b.get(hdr[col_alc], "")).strip().lower()
+            alc_after = str(row_a.get(hdr[col_alc], "")).strip()
+            alc_changed = (alc_before != alc_after.lower() and alc_before != "")
+
+            planas.append((archivo, kpi, sub, serv, antes_str, despues_str,
+                          gap_str, alc_after, alc_changed))
+
+    if not planas:
+        info("(sin datos de RESUMEN_KPI para comparar)")
+        return
+
+    # Ordenar por SERVICIO (col 3, índice 3 en la tupla)
+    planas.sort(key=lambda r: (r[3], r[0], r[1]))
+
+    # Calcular anchos
+    ancho_archivo = max(len(p[0]) for p in planas)
+    ancho_kpi = max(len(p[1]) for p in planas)
+    ancho_sub = max(len(p[2]) for p in planas)
+    ancho_serv = max(len(p[3]) for p in planas)
+    ancho_antes = max(len(p[4]) for p in planas)
+    ancho_despues = max(len(p[5]) for p in planas)
+    ancho_gap = max(len(p[6]) for p in planas)
+    ancho_alc = max(len(p[7]) for p in planas)
+
+    cols_h = ["ARCHIVO", "KPI", "SUBÁREA", "SERVICIO", "ANTES", "DESPUÉS", "Δ GAP", "ALCANCE"]
+    col_widths = [
+        max(ancho_archivo, len(cols_h[0])),
+        max(ancho_kpi, len(cols_h[1])),
+        max(ancho_sub, len(cols_h[2])),
+        max(ancho_serv, len(cols_h[3])),
+        max(ancho_antes, len(cols_h[4])),
+        max(ancho_despues, len(cols_h[5])),
+        max(ancho_gap, len(cols_h[6])),
+        max(ancho_alc, len(cols_h[7])),
+    ]
+
+    def fmt_row(vals, color_override=None):
+        parts = []
+        for i, v in enumerate(vals):
+            padded = str(v).ljust(col_widths[i])
+            if color_override:
+                parts.append(_c(color_override, padded))
+            else:
+                parts.append(padded)
+        return " │ ".join(parts)
+
+    sep_line = "─" * (sum(col_widths) + 3 * (len(col_widths) - 1) + 2)
+
+    print(f"  {_c(_C_GREEN, '┌' + '─' * (sep_line.count('─') + 2) + '┐')}")
+    print(f"  {_c(_C_GREEN, '│')}  {_c(_C_CYAN, 'Tabla consolidada — todas las tablas RESUMEN_KPI ordenadas por SERVICIO')}")
+    print(f"  {_c(_C_GREEN, '├' + '─' * (sep_line.count('─') + 2) + '┤')}")
+    print(f"  {_c(_C_GREEN, '└' + '─' * (sep_line.count('─') + 2) + '┘')}")
+    print()
+
+    # Header
+    print(f"  {_c(_C_CYAN, fmt_row(cols_h))}")
+    print(f"  {_c(_C_GRAY, sep_line)}")
+
+    last_file = None
+    for idx, p in enumerate(planas):
+        arch, kpi, sub, serv, antes, despues, gap_str, alc_text, alc_changed = p
+
+        # Separador entre archivos
+        if arch != last_file and last_file is not None:
+            print(f"  {_c(_C_GRAY, sep_line)}")
+        last_file = arch
+
+        # Armar fila
+        vals = [arch, kpi, sub, serv, antes, despues, gap_str, alc_text]
+
+        marcar_rojo = False
+        color_overrides = [None] * 8
+
+        # Colorear gap: verde si positivo, rojo si negativo
+        if gap_str not in ("N/A", "0.0000", ""):
+            try:
+                g = float(gap_str)
+                if g > 0:
+                    color_overrides[6] = _C_GREEN
+                elif g < 0:
+                    color_overrides[6] = _C_RED
+            except ValueError:
+                pass
+
+        # ALCANCE en rojo si cambió
+        if alc_changed:
+            color_overrides[7] = _C_RED
+            marcar_rojo = True
+
+        # Marcador visual si hubo cambios
+        marker = _c(_C_YELLOW, "⚡") if marcar_rojo or gap_str not in ("N/A", "0.0000", "") else " "
+
+        line_parts = []
+        for i, v in enumerate(vals):
+            padded = str(v).ljust(col_widths[i])
+            c = color_overrides[i]
+            line_parts.append(_c(c, padded) if c else padded)
+
+        line = " │ ".join(line_parts)
+        print(f"  {marker} {line}")
+
+    print(f"  {_c(_C_GRAY, sep_line)}")
+
+    # Leyenda
+    print()
+    info(f"{_c(_C_GREEN, 'verde')} = gap positivo (mejoró)")
+    info(f"{_c(_C_RED, 'rojo')}   = gap negativo o ALCANCE cambió")
+    info(f"{_c(_C_YELLOW, '⚡')}  = fila con cambios")
+    print()
+    info(f"Total filas: {len(planas)} de {len(tablas_coleccion)} archivos")
+    print()
 
 
 # ────────────────────────────── ORQUESTACIÓN PADRE ──────────────────────────────
@@ -468,6 +674,7 @@ def main():
     activos: Dict[str, Tuple[Process, Queue, float, str, int, Optional[int], Optional[dict]]] = {}
     resultados: List[Tuple[str, bool]] = []
     detalles_finales: Dict[str, dict] = {}
+    tablas_coleccion: List[dict] = []  # {archivo, headers, before, after}
     t0 = time.time()
 
     # ── Barra de progreso ──
@@ -586,6 +793,15 @@ def main():
                 resumen = msg["resumen"]
                 detalles_finales[stem] = resumen
                 resultados.append((stem, resumen["ok"]))
+
+                # Coleccionar datos de tablas RESUMEN_KPI
+                if msg.get("tablas") and msg["tablas"].get("headers"):
+                    tablas_coleccion.append({
+                        "archivo": resumen["archivo"],
+                        "headers": msg["tablas"]["headers"],
+                        "before": msg["tablas"].get("before", []),
+                        "after": msg["tablas"].get("after", []),
+                    })
 
                 if resumen["ok"]:
                     ok(f"{stem} → {resumen['ruta_local']} ({resumen['duracion_s']}s)")
@@ -711,6 +927,9 @@ def main():
     info(f"Duración total: {total_dur:.2f}s")
     info(f"CSV:           {CSV_PROCESS_PATH}")
     print()
+
+    # Tabla comparativa acumulada
+    print_tablas_comparativa(tablas_coleccion)
 
     return 0 if len(errores) == 0 else 1
 
